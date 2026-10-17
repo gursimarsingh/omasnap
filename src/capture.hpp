@@ -4,6 +4,7 @@
 #include "cut.hpp"
 #include "pin.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -448,6 +449,14 @@ bool removeEditorHandoff(const QString &path, const QString &token);
 [[nodiscard]] bool saveTemporarySnapshot(const QImage &image, QString path,
                                          QString &error);
 [[nodiscard]] QString recognizeText(const QImage &image, QString &error);
+/** Finds email-shaped OCR words in source pixels plus existing redactions.
+ *  Run on a worker. Returned boxes are padded, clamped and selection-relative;
+ *  recognized text is never returned, copied, logged or written to disk.
+ *  The optional stop token cancels only this invocation's OCR process. */
+[[nodiscard]] QVector<QRectF> findEmailRedactions(
+    const CaptureData &capture, const QRectF &selection,
+    const QVector<Annotation> &annotations, QString &error,
+    const std::shared_ptr<std::atomic_bool> &stop = {});
 /** Builds the omarchy-notification-send argv. With an image, the click command
  *  follows --exec as separate words (program, then file URL) and nothing else
  *  comes after it, since --exec consumes the rest of the line unparsed. */

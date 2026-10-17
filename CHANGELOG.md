@@ -7,6 +7,10 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 
 ### Added
 
+- Find email addresses from the Redact hover menu and add editable solid
+  redaction suggestions. Recognition runs locally in the background, supports
+  cancellation, and leaves export and review to the user.
+
 - Hold `Ctrl` while dragging with Cut (`X`) to insert a transparent band.
   Annotations shift with the image, and insertion supports undo and redo.
 

@@ -13,6 +13,7 @@
 #include "cut-mapping-smoke.hpp"
 #include "cut-smoke.hpp"
 #include "editor.hpp"
+#include "email-redaction-smoke.hpp"
 #include "shortcut-guide.hpp"
 #include "selection-repaint-smoke.hpp"
 #include "overlay-chrome.hpp"
@@ -12520,6 +12521,10 @@ int main(int argc, char **argv) {
     return 82;
   }
   if (!runScrollStartupSmoke(snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return EXIT_FAILURE;
+  }
+  if (!runEmailRedactionSmoke(snapshotError)) {
     qWarning().noquote() << snapshotError;
     return EXIT_FAILURE;
   }
