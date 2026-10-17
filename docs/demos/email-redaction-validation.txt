@@ -1,0 +1,48 @@
+Omasnap email redaction validation — 2026-10-18
+
+Feature commit: 94f6872c498e6c2e5d29256456a23eca34b63dab
+Upstream baseline: 6771b19de8bcead2b17c16b49f1a8a97445dd8e3
+
+PASS: Release build, GCC 16.2.1, Qt 6.12.0, LayerShellQt 6.8.0, Arch container.
+PASS: Full-source clang-tidy invocation via make lint qt-lint (exit 0; warnings
+remain). Optional clazy was unavailable; no QML sources/qmllint pass.
+PASS: Final focused runEmailRedactionSmoke, exit 0, 1656 ms. Includes deterministic
+TSV/process fixtures, native/fractional crop mapping, every original OCR-word
+pixel replaced by an opaque solid pixel, history-cap refusal, undo/redo and
+JSON reopen, cancellation/stale completion, process cleanup, and real Tesseract.
+This timing is one test run, not a performance benchmark.
+
+FULL SUITE LIMITATION:
+make check was attempted. In this Arch/Qt 6.12 environment the original upstream
+font test needs a fontconfig alias from monospace to the repository's bundled
+JetBrains Mono; packaged Noto Sans Mono lacks the metadata Qt expects. With
+that environment-only alias, both pristine upstream and the feature branch
+stop before the new tests with:
+  History persistence held up the corner preview or overlay dismissal
+The same baseline output-check failure persists with 8 CPUs, writable HOME,
+private XDG_RUNTIME_DIR and tmpfs /tmp. No baseline tests were bypassed or
+changed. The feature tests were independently executed against the built core.
+
+NATIVE GUI RECORDING:
+Actual CaptureEditor/core, synthetic fixture, local real Tesseract. Automated
+native QMP mouse/keyboard on Omarchy 4.0.4 / Hyprland 0.56.2 in a disposable,
+offline KVM overlay (4 vCPU, 8 GiB, software graphics). Matching isolated Qt 6.12
+runtime was bundled for the demo; the guest OS's Qt 6.11 packages were unchanged.
+The UI shows Redact hover > Find email addresses > 3 editable solid boxes >
+Ctrl+Z to 2 > Ctrl+Y to 3. Final report exit 0, source hashes unchanged.
+No general OCR accuracy or detection-coverage claim is implied by 3 fixtures.
+OCR can miss/misread small, rotated or split text; manually review before sharing.
+
+Recording: silent QMP guest framebuffer, target 10 captured frames/sec, encoded
+as H.264 1280x768 at 30 fps with duplicated frames; no interpolation or simulated UI.
+Trimmed to 15 seconds. This is not a frame-rate measurement.
+Video SHA256: e96cc5b3c16594200283b5cf6d9dd2ea5f8c50085f899b4754ac2739875b9e3d
+Recorded product binary and final rebuilt product binary are byte-identical:
+c0d157c26ddc5787457fcc1c535e49c3e6dbcf12491457ca7a5b25da1bcd2a72
+
+The original guest disk was retained unchanged; only a new overlay was used.
+Guest shut down normally; qemu-img check on the overlay found no errors.
+
+The feature adds no dependency, network service, model download or clipboard
+side effect. Existing ordinary OCR behavior is retained. This draft stays in
+the user's fork pending resolution/confirmation of the upstream full-suite issue.
