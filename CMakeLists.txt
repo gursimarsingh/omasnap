@@ -51,6 +51,8 @@ add_library(omasnap-core STATIC
   src/png.hpp
   src/capture.cpp
   src/capture.hpp
+  src/email-redaction.cpp
+  src/email-redaction.hpp
   src/cut.cpp
   src/cut.hpp
   src/palette-config.cpp
@@ -157,6 +159,8 @@ qt_add_executable(omasnap-smoke
   tests/chrome-theme-smoke.cpp
   tests/chrome-theme-smoke.hpp
   tests/editor-smoke.cpp
+  tests/email-redaction-smoke.cpp
+  tests/email-redaction-smoke.hpp
   tests/recent-persistence-smoke.cpp
   tests/recent-persistence-smoke.hpp
   tests/selection-repaint-smoke.cpp

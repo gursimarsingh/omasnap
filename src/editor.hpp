@@ -224,6 +224,11 @@ private:
     QColor color;
   };
 
+  struct EmailRedactionResult {
+    QVector<QRectF> regions;
+    QString error;
+  };
+
   struct OcrResult {
     QString text;
     QString error;
@@ -489,6 +494,7 @@ private:
   [[nodiscard]] QRectF colorPaletteRect() const;
   [[nodiscard]] QRectF customColorPanelRect() const;
   [[nodiscard]] QRectF shapeMenuRect() const;
+  [[nodiscard]] QRectF redactionMenuRect() const;
   [[nodiscard]] QRectF textSizePanelRect() const;
   [[nodiscard]] QVector<QRectF> cropHandleRects() const;
   [[nodiscard]] int cropHandleAt(const QPointF &point) const;
@@ -659,6 +665,7 @@ private:
   void redoEdit();
   void selectWindowInDirection(int key);
   friend bool runSaveAsSmoke(QString &error);
+  friend bool runEmailRedactionSmoke(QString &error);
   void cancelSaveAs();
   void restoreSaveAsFocus();
   void saveAs();
@@ -673,6 +680,8 @@ private:
   void refreshBackdropCache();
   void refreshComposedCapture();
   void runOcr(const QRectF &localSelection = {});
+  void runEmailRedaction();
+  void cancelEmailRedaction();
   void dismissOcrOverlay();
   void paintOcrOverlay(QPainter &painter, const QRectF &image, qreal scale);
   void setStatus(QString status);
@@ -852,10 +861,12 @@ private:
   bool colorPaletteOpen_ = false;
   bool customColorPickerOpen_ = false;
   bool shapeMenuOpen_ = false;
+  bool redactionMenuOpen_ = false;
   bool textSizeMenuOpen_ = false;
   QPointF paletteIntentOrigin_;
   QPointF customColorIntentOrigin_;
   QPointF shapeIntentOrigin_;
+  QPointF redactionIntentOrigin_;
   QPointF textSizeIntentOrigin_;
   bool usingCustomColor_ = false;
   int hoveredWindow_ = -1;
@@ -981,6 +992,9 @@ private:
   QPointF panAnchor_;
   QColor textColor_;
   QFutureWatcher<OcrResult> ocrWatcher_;
+  QFutureWatcher<EmailRedactionResult> emailRedactionWatcher_;
+  std::shared_ptr<std::atomic_bool> emailRedactionStop_;
+  bool emailRedactionPending_ = false;
   QFutureWatcher<FinishResult> finishWatcher_;
   bool saveAsActive_ = false;
   quint64 saveAsRequest_ = 0;

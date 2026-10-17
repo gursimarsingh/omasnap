@@ -54,6 +54,8 @@ preview keeps it on screen.
   Display (plain, outlined, or on a readability pill), and secure redaction with
   opaque or randomized non-spatial mosaic output.
 - Per-layer preset or custom colors (including highlighter ink), undo/redo history,
+  email-redaction suggestions from the Redact hover menu (review and adjust
+  the solid boxes before sharing),
   one-click whole-image or drag-region OCR (the recognized text is shown beside
   the image and copied to the clipboard),
   mesh-gradient backdrops, and rendered drop shadows on standard backdrop cards.
@@ -486,7 +488,7 @@ region after changing the display layout.
 | `C` | Numbered marker |
 | `R` | Rectangle; hover the shape button for rectangle, ellipse, and fill controls; `Alt`+wheel rounds corners |
 | `E` | Ellipse; shares the shape submenu and filled/hollow toggle |
-| `D` | Redact; press again to toggle randomized pixelation or solid redaction |
+| `D` | Redact; press again to toggle randomized pixelation or solid redaction. Hover the Redact button for **Find email addresses**, then review the suggested boxes. |
 | `X` | Cut out a band; drag to preview the crossed-out strip, then release to remove and collapse it. **Ctrl** (with Cut armed, or **Ctrl+X**) inserts a band instead; the cut icon becomes a split-plus |
 | `T` | Text on a cream readability pill, with Neucha as the default. Click for a one-line label, or drag a box to give it room for several lines: Enter moves to the next line while there is room and commits on the last one; `Shift+Enter` always adds a line; `Esc` commits the text and dismisses the annotator; long text wraps at the current canvas edge by default, while moving it or dragging its width handle beyond that edge expands the canvas; clicking away keeps the text; press T again to toggle the pill |
 | `Shift+T` | Cycle the next or selected text through Neucha, JetBrains Mono, and Inter Display |
@@ -631,6 +633,20 @@ layers show a selection boundary. The eight handles outside the image recrop
 its corners or edges. The image stays in place while dragging a crop handle, then
 re-centers when released. After the canvas grows, those crop handles remain on the
 original source frame.
+
+### Email redaction suggestions
+
+Hover the Redact toolbar button and choose **Find email addresses**. Tesseract
+looks for conventional email addresses in the current screenshot selection and
+adds editable solid redaction layers. Existing redactions are respected. Each
+box uses normal undo/redo and remains editable when the capture is reopened.
+The scan stays local, does not copy recognized text, and can be cancelled with
+`Esc`. It never saves or copies the image for you.
+
+Review every result before sharing: OCR can miss or misread addresses, including
+small, rotated or split text. This action does not detect other sensitive data
+or text annotations added in the editor. If the suggestions would exceed the
+available undo history, none are applied.
 
 ## Development and verification
 

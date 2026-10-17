@@ -157,6 +157,7 @@ constexpr qreal kToolbarTop = 39.0;
 /// crucially, the canvas fit geometry derived from its scale.
 constexpr qreal kToolbarGroupGap = 10;
 constexpr qreal kMinimumRedactionExtent = 5.0;
+constexpr qsizetype kMaximumOperations = 100;
 constexpr int kBackdropDim = 143;
 
 qreal highlighterPreviewHeight(qreal annotationSize) {
@@ -932,6 +933,49 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
     });
   });
 
+  connect(&emailRedactionWatcher_,
+          &QFutureWatcher<EmailRedactionResult>::finished, this, [this] {
+    const EmailRedactionResult result = emailRedactionWatcher_.result();
+    const bool cancelled = !emailRedactionStop_ || emailRedactionStop_->load();
+    emailRedactionPending_ = false;
+    emailRedactionStop_.reset();
+    // A cancelled scan may finish after another action has taken ownership
+    // of busy/status. Its copied pixels must never alter that later document.
+    if (cancelled)
+      return;
+    busy_ = false;
+    if (!result.error.isEmpty()) {
+      setStatus(result.error);
+      return;
+    }
+    if (result.regions.isEmpty()) {
+      setStatus(QStringLiteral("No email addresses detected · review manually"));
+      return;
+    }
+    // commitOp truncates old history at this limit. Never let a batch of
+    // suggestions evict earlier redactions, crop or cut operations.
+    if (opIndex_ + result.regions.size() > kMaximumOperations) {
+      setStatus(QStringLiteral("Not enough undo history for email suggestions"));
+      return;
+    }
+    for (const QRectF &region : result.regions) {
+      Annotation annotation;
+      annotation.kind = Annotation::Kind::Redaction;
+      annotation.redactionStyle = RedactionStyle::Solid;
+      annotation.start = region.topLeft();
+      annotation.end = region.bottomRight();
+      commitAnnotate(std::move(annotation));
+    }
+    tool_ = Tool::Select;
+    selectedAnnotation_ = -1;
+    selectedAnnotations_.clear();
+    setStatus(QStringLiteral("%1 email redaction suggestion%2 · review before sharing")
+                  .arg(result.regions.size())
+                  .arg(result.regions.size() == 1 ? QString() : QStringLiteral("s")));
+    updatePointerCursor();
+    update();
+  });
+
   connect(&finishWatcher_, &QFutureWatcher<FinishResult>::resultReadyAt, this,
           [this] { completeFinish(finishWatcher_.result()); });
 
@@ -1100,6 +1144,10 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
 }
 
 CaptureEditor::~CaptureEditor() {
+  disconnect(&emailRedactionWatcher_, nullptr, this, nullptr);
+  if (emailRedactionStop_)
+    emailRedactionStop_->store(true);
+  emailRedactionWatcher_.waitForFinished();
   cancelSaveAs();
   // Output completion closes the window before history compression finishes.
   // Drain those value-only workers after the surface has gone; main releases
@@ -2056,6 +2104,14 @@ QRectF CaptureEditor::shapeMenuRect() const {
   return {anchor.center().x() - 58, anchor.bottom() + 4, 116, 36};
 }
 
+QRectF CaptureEditor::redactionMenuRect() const {
+  const QRectF anchor = toolbarButtonRect(QStringLiteral("tool-redact"));
+  constexpr qreal menuWidth = 190;
+  const qreal x = std::clamp(anchor.center().x() - menuWidth / 2.0, 8.0,
+                             std::max(8.0, width() - menuWidth - 8.0));
+  return {x, anchor.bottom() + 4, menuWidth, 36};
+}
+
 QRectF CaptureEditor::textSizePanelRect() const {
   const QRectF anchor = toolbarButtonRect(QStringLiteral("tool-text"));
   return {anchor.center().x() - 51, anchor.bottom() + 6, 102, 34};
@@ -2269,6 +2325,7 @@ bool CaptureEditor::canStartAnnotationAt(const QPointF &position) const {
   if ((colorPaletteOpen_ && colorPaletteRect().contains(position)) ||
       (customColorPickerOpen_ && customColorPanelRect().contains(position)) ||
       (shapeMenuOpen_ && shapeMenuRect().contains(position)) ||
+      (redactionMenuOpen_ && redactionMenuRect().contains(position)) ||
       (textSizeMenuOpen_ && textSizePanelRect().contains(position)))
     return false;
   if (requiresSourcePixels(tool_))
@@ -2727,7 +2784,7 @@ CaptureEditor::toolbarButtons(QVector<qreal> *groupDividers,
                          : QStringLiteral("rounded"))
           .arg(spotlightMagnification_, 0, 'f', 1));
   add(36, QStringLiteral("tool-redact"), {},
-      QStringLiteral("Redact · D · %1 · D again toggles")
+      QStringLiteral("Redact · D · %1 · D again toggles · hover for email suggestions")
           .arg(redactionStyleName(redactionStyle_)));
   add(36, QStringLiteral("tool-cut"), {},
       cutInsertHint()
@@ -2764,6 +2821,13 @@ CaptureEditor::toolbarButtons(QVector<qreal> *groupDividers,
                        QStringLiteral("shape-fill"),
                        fillShapes_ ? QStringLiteral("filled") : QString(),
                        QStringLiteral("Toggle filled or outlined shapes"), {}});
+  }
+  if (includeSubmenus && redactionMenuOpen_) {
+    const QRectF menu = redactionMenuRect();
+    buttons.push_back({menu.adjusted(4, 4, -4, -4),
+                       QStringLiteral("redact-emails"),
+                       QStringLiteral("Find email addresses"),
+                       QStringLiteral("Suggest solid redactions · review before sharing"), {}});
   }
   if (includeSubmenus && colorPaletteOpen_) {
     const QRectF palette = colorPaletteRect();
@@ -2950,8 +3014,7 @@ void CaptureEditor::commitOp(Operation op) {
   if (opIndex_ < ops_.size())
     ops_.resize(opIndex_);
   ops_.push_back(std::move(op));
-  constexpr qsizetype maximumOps = 100;
-  while (ops_.size() > maximumOps) {
+  while (ops_.size() > kMaximumOperations) {
     // Replay starts at the full monitor; the first Crop is the selected
     // region/window. Dropping it leaves annotations in cropped space.
     if (ops_.constFirst().type == Operation::Type::Crop)
@@ -3149,6 +3212,7 @@ void CaptureEditor::completeBackdropLoad() {
 }
 
 void CaptureEditor::replayLog() {
+  cancelEmailRedaction();
   QVector<quint64> selectedIds;
   for (const int index : selectedAnnotations_) {
     if (index >= 0 && index < annotations_.size() &&
@@ -3608,6 +3672,11 @@ void CaptureEditor::enterExport() {
 }
 
 void CaptureEditor::handleEscape() {
+  if (emailRedactionPending_ && emailRedactionStop_ &&
+      !emailRedactionStop_->load()) {
+    cancelEmailRedaction();
+    return;
+  }
   // Selecting: there is nothing to step back from, so one Esc closes (the
   // launch key then Esc is the quickest "never mind"). Only a drag in flight
   // is cancelled first. Editing: dismiss and return the document to its pin.
@@ -4027,6 +4096,41 @@ void CaptureEditor::runOcr(const QRectF &localSelection) {
   }));
 }
 
+void CaptureEditor::runEmailRedaction() {
+  if (busy_ || emailRedactionPending_ || phase_ != Phase::Edit ||
+      selection_.isEmpty() || dragging_ || panning_ || textEditing() ||
+      interaction_ != Interaction::None || capturePending_ ||
+      reopenWatcher_.isRunning() || configuredCustomDefaultPending_)
+    return;
+  endNudgeRun();
+  redactionMenuOpen_ = false;
+  dismissOcrOverlay();
+  emailRedactionStop_ = std::make_shared<std::atomic_bool>(false);
+  emailRedactionPending_ = true;
+  busy_ = true;
+  setStatus(QStringLiteral("Finding email addresses… · Esc cancels"));
+  const CaptureData capture = capture_;
+  const QRectF selection = selection_;
+  const QVector<Annotation> annotations = annotations_;
+  const auto stop = emailRedactionStop_;
+  emailRedactionWatcher_.setFuture(QtConcurrent::run(
+      [capture, selection, annotations, stop] {
+        EmailRedactionResult result;
+        result.regions = findEmailRedactions(capture, selection, annotations,
+                                             result.error, stop);
+        return result;
+      }));
+  update();
+}
+
+void CaptureEditor::cancelEmailRedaction() {
+  if (!emailRedactionPending_ || !emailRedactionStop_ ||
+      emailRedactionStop_->exchange(true))
+    return;
+  busy_ = false;
+  setStatus(QStringLiteral("Email detection cancelled"));
+}
+
 void CaptureEditor::dismissOcrOverlay() {
   ocrAnimTimer_.stop();
   ocrResultTimer_.stop();
@@ -4304,6 +4408,10 @@ void CaptureEditor::completeFinish(const FinishResult &result) {
 void CaptureEditor::handleToolbar(const QString &action) {
   const Tool toolBefore = tool_;
   const QString statusBefore = status_;
+  if (action == QStringLiteral("redact-emails")) {
+    runEmailRedaction();
+    return;
+  }
   if (action == QStringLiteral("tool-select"))
     tool_ = Tool::Select;
   else if (action.startsWith(QStringLiteral("tool-arrow-"))) {
@@ -4421,6 +4529,7 @@ void CaptureEditor::handleToolbar(const QString &action) {
 }
 
 void CaptureEditor::closeEvent(QCloseEvent *event) {
+  cancelEmailRedaction();
   cancelSaveAs();
   if (!event->spontaneous()) {
     QWidget::closeEvent(event);
@@ -4444,6 +4553,12 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
                               key == Qt::Key_Alt || key == Qt::Key_Meta;
     if (!modifierOnly)
       dismissOcrOverlay();
+  }
+  if (event->key() == Qt::Key_Escape && emailRedactionPending_ &&
+      emailRedactionStop_ && !emailRedactionStop_->load()) {
+    cancelEmailRedaction();
+    event->accept();
+    return;
   }
   if (phase_ == Phase::Export || busy_) {
     event->accept();
@@ -5609,6 +5724,7 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     bool overPaletteAnchor = false;
     bool overCustomAnchor = false;
     bool overShapeAnchor = false;
+    bool overRedactionAnchor = false;
     bool overTextAnchor = false;
     for (const ToolbarButton &button : toolbarButtons()) {
       if (button.action == QStringLiteral("palette") &&
@@ -5624,6 +5740,10 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
                  button.rect.contains(cursor_)) {
         overShapeAnchor = true;
         shapeIntentOrigin_ = cursor_;
+      } else if (button.action == QStringLiteral("tool-redact") &&
+                 button.rect.contains(cursor_)) {
+        overRedactionAnchor = true;
+        redactionIntentOrigin_ = cursor_;
       } else if (button.action == QStringLiteral("tool-text") &&
                  button.rect.contains(cursor_)) {
         overTextAnchor = true;
@@ -5650,6 +5770,15 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     shapeMenuOpen_ = overShapeAnchor || overShapes || approachingShapes;
     if (!shapeMenuOpen_)
       shapeIntentOrigin_ = {};
+    const bool overRedactions =
+        redactionMenuOpen_ && redactionMenuRect().contains(cursor_);
+    const bool approachingRedactions =
+        redactionMenuOpen_ && inDownwardSubmenuTriangle(
+                                  redactionIntentOrigin_, redactionMenuRect(), cursor_);
+    redactionMenuOpen_ =
+        overRedactionAnchor || overRedactions || approachingRedactions;
+    if (!redactionMenuOpen_)
+      redactionIntentOrigin_ = {};
     const bool overTextSizes =
         textSizeMenuOpen_ && textSizePanelRect().contains(cursor_);
     const bool approachingTextSizes =
@@ -5686,7 +5815,7 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
 }
 
 void CaptureEditor::mouseDoubleClickEvent(QMouseEvent *event) {
-  if (phase_ != Phase::Edit || event->button() != Qt::LeftButton ||
+  if (busy_ || phase_ != Phase::Edit || event->button() != Qt::LeftButton ||
       !visibleEditImageRect().contains(event->position()))
     return;
   const int index = annotationAt(toAnnotationPoint(event->position()));
@@ -6612,7 +6741,8 @@ void CaptureEditor::updatePointerCursor() {
   }
   if ((colorPaletteOpen_ && colorPaletteRect().contains(cursor_)) ||
       (customColorPickerOpen_ && customColorPanelRect().contains(cursor_)) ||
-      (shapeMenuOpen_ && shapeMenuRect().contains(cursor_))) {
+      (shapeMenuOpen_ && shapeMenuRect().contains(cursor_)) ||
+      (redactionMenuOpen_ && redactionMenuRect().contains(cursor_))) {
     clearHighlighterPreview();
     applyCursor(Qt::PointingHandCursor);
     return;
@@ -6913,6 +7043,7 @@ void CaptureEditor::returnToSelect() {
   colorPaletteOpen_ = false;
   customColorPickerOpen_ = false;
   shapeMenuOpen_ = false;
+  redactionMenuOpen_ = false;
   textSizeMenuOpen_ = false;
   dismissOcrOverlay();
   // Everything edited derives from the op log; an empty log is the untouched
@@ -7735,6 +7866,11 @@ void CaptureEditor::paintEdit(QPainter &painter) {
     painter.setBrush(chromeTheme().surface);
     painter.drawRoundedRect(shapeMenuRect(), 9, 9);
   }
+  if (redactionMenuOpen_) {
+    painter.setPen(QPen(chromeTheme().panelBorder.brush(redactionMenuRect()), 1));
+    painter.setBrush(chromeTheme().surface);
+    painter.drawRoundedRect(redactionMenuRect(), 9, 9);
+  }
   if (colorPaletteOpen_) {
     painter.setPen(QPen(chromeTheme().panelBorder.brush(colorPaletteRect()), 1));
     painter.setBrush(chromeTheme().surface);
@@ -7914,7 +8050,11 @@ void CaptureEditor::paintEdit(QPainter &painter) {
                               ? theme.accentText
                           : selected ? theme.buttonSelectedText
                           : hovered ? theme.buttonHoverText : theme.buttonText;
-      drawToolbarIcon(painter, button.rect, icon, button.label, text);
+      if (button.action == QStringLiteral("redact-emails")) {
+        painter.setPen(text);
+        painter.drawText(button.rect, Qt::AlignCenter, button.label);
+      } else
+        drawToolbarIcon(painter, button.rect, icon, button.label, text);
     }
   }
   if (textSizeMenuOpen_ && !colorPaletteOpen_ && !customColorPickerOpen_) {

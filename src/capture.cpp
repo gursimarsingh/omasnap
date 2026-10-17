@@ -2,6 +2,7 @@
 #include <QTextLayout>
 #include <QTextOption>
 #include "capture.hpp"
+#include "email-redaction.hpp"
 #include "pin-file.hpp"
 #include "pin-layout.hpp"
 #include "png.hpp"
@@ -14,6 +15,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -317,7 +319,10 @@ struct ProcessResult {
 
 ProcessResult runProcess(const QString &program, const QStringList &arguments,
                          const QByteArray &input = {}, int timeoutMs = 10000,
-                         const QProcessEnvironment &environment = {}) {
+                         const QProcessEnvironment &environment = {},
+                         const std::shared_ptr<std::atomic_bool> &stop = {}) {
+  if (stop && stop->load())
+    return {};
   QProcess process;
   process.setProcessChannelMode(QProcess::SeparateChannels);
   if (!environment.isEmpty())
@@ -329,11 +334,69 @@ ProcessResult runProcess(const QString &program, const QStringList &arguments,
   if (!input.isEmpty())
     process.write(input);
   process.closeWriteChannel();
-  const bool finished = process.waitForFinished(timeoutMs);
-  if (!finished)
+  bool finished = false;
+  if (!stop) {
+    finished = process.waitForFinished(timeoutMs);
+  } else {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!stop->load() && elapsed.elapsed() < timeoutMs) {
+      if (process.state() == QProcess::NotRunning) {
+        finished = true;
+        break;
+      }
+      const int remaining = timeoutMs - static_cast<int>(elapsed.elapsed());
+      if (remaining <= 0)
+        break;
+      if (process.waitForFinished(std::min(50, remaining))) {
+        finished = true;
+        break;
+      }
+    }
+  }
+  if (!finished) {
     process.kill();
+    if (stop)
+      process.waitForFinished(2000);
+  }
   return {process.readAllStandardOutput(), process.readAllStandardError(),
           finished ? process.exitCode() : -1, finished};
+}
+
+QByteArray prepareOcrImage(const QImage &image, QString &error) {
+  QByteArray payload;
+  QBuffer buffer(&payload);
+  if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG")) {
+    error = QStringLiteral("Could not prepare image for OCR");
+    return {};
+  }
+  return payload;
+}
+
+ProcessResult runOcr(const QByteArray &payload, const QString &segmentation,
+                     bool wordBoxes, QString &languages,
+                     const std::shared_ptr<std::atomic_bool> &stop = {}) {
+  languages = qEnvironmentVariable("OMASNAP_OCR_LANGS");
+  if (languages.isEmpty())
+    languages =
+        qEnvironmentVariable("OMARCHY_OCR_LANGS", QStringLiteral("eng"));
+  languages = languages.trimmed();
+  // Tesseract's OpenMP build starts a thread per core and spins them; on a
+  // screenshot that costs about three times the CPU and adds wall time
+  // instead of saving it. One thread reads the same text faster.
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  environment.insert(QStringLiteral("OMP_THREAD_LIMIT"), QStringLiteral("1"));
+  QStringList arguments{
+      QStringLiteral("stdin"), QStringLiteral("stdout"),
+      QStringLiteral("--oem"), QStringLiteral("1"),
+      QStringLiteral("--psm"), segmentation,
+      QStringLiteral("-l"), languages,
+      QStringLiteral("--dpi"), QStringLiteral("300"),
+      QStringLiteral("-c"), QStringLiteral("preserve_interword_spaces=1")};
+  if (wordBoxes)
+    arguments.push_back(QStringLiteral("tsv"));
+  return runProcess(QStringLiteral("tesseract"), arguments, payload, 30000,
+                    environment, stop);
 }
 
 bool copyToWaylandClipboard(const QString &mimeType, const QByteArray &payload,
@@ -2596,32 +2659,12 @@ bool copyTextToClipboard(const QString &text, QString &error) {
 }
 
 QString recognizeText(const QImage &image, QString &error) {
-  QByteArray payload;
-  QBuffer buffer(&payload);
-  if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG")) {
-    error = QStringLiteral("Could not prepare image for OCR");
+  const QByteArray payload = prepareOcrImage(image, error);
+  if (payload.isEmpty())
     return {};
-  }
-
-  QString languages = qEnvironmentVariable("OMASNAP_OCR_LANGS");
-  if (languages.isEmpty())
-    languages =
-        qEnvironmentVariable("OMARCHY_OCR_LANGS", QStringLiteral("eng"));
-  languages = languages.trimmed();
-  // Tesseract's OpenMP build starts a thread per core and spins them; on a
-  // screenshot that costs about three times the CPU and adds wall time
-  // instead of saving it. One thread reads the same text faster.
-  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-  environment.insert(QStringLiteral("OMP_THREAD_LIMIT"), QStringLiteral("1"));
-  const ProcessResult result = runProcess(
-      QStringLiteral("tesseract"),
-      {QStringLiteral("stdin"), QStringLiteral("stdout"),
-       QStringLiteral("--oem"), QStringLiteral("1"),
-       QStringLiteral("--psm"), QStringLiteral("6"),
-       QStringLiteral("-l"), languages,
-       QStringLiteral("--dpi"), QStringLiteral("300"),
-       QStringLiteral("-c"), QStringLiteral("preserve_interword_spaces=1")},
-      payload, 30000, environment);
+  QString languages;
+  const ProcessResult result =
+      runOcr(payload, QStringLiteral("6"), false, languages);
   if (!result.finished || result.exitCode != 0) {
     error = QStringLiteral("OCR failed for languages %1: %2")
                 .arg(languages, QString::fromUtf8(result.error).trimmed());
@@ -2631,6 +2674,85 @@ QString recognizeText(const QImage &image, QString &error) {
   if (text.isEmpty())
     error = QStringLiteral("No text found in selection");
   return text;
+}
+
+QVector<QRectF> findEmailRedactions(
+    const CaptureData &capture, const QRectF &selection,
+    const QVector<Annotation> &annotations, QString &error,
+    const std::shared_ptr<std::atomic_bool> &stop) {
+  error.clear();
+  const auto cancelled = [&stop, &error]() {
+    if (!stop || !stop->load())
+      return false;
+    error = QStringLiteral("Email detection cancelled");
+    return true;
+  };
+  if (cancelled())
+    return {};
+  if (capture.source.isNull() || capture.previewSize.isEmpty() ||
+      selection.isEmpty() || !std::isfinite(selection.x()) ||
+      !std::isfinite(selection.y()) || !std::isfinite(selection.width()) ||
+      !std::isfinite(selection.height())) {
+    error = QStringLiteral("No image selected for email detection");
+    return {};
+  }
+
+  QVector<Annotation> redactions;
+  for (const Annotation &annotation : annotations) {
+    if (annotation.kind == Annotation::Kind::Redaction)
+      redactions.push_back(annotation);
+  }
+  // OCR should see only source content and the already-destroyed pixels.
+  // Preserve the native crop so no inverse resampling is needed to map a box.
+  CaptureData nativeCapture = capture;
+  nativeCapture.preserveSourceResolution = true;
+  const QRect pixels = pixelSelection(nativeCapture, selection);
+  const QImage image = renderCapture(nativeCapture, selection, redactions,
+                                     BackgroundStyle::None, false,
+                                     CanvasBoundaryMode::Image);
+  if (cancelled())
+    return {};
+  if (image.isNull()) {
+    error = QStringLiteral("Could not prepare image for email detection");
+    return {};
+  }
+  const QByteArray payload = prepareOcrImage(image, error);
+  if (payload.isEmpty() || cancelled())
+    return {};
+  QString languages;
+  const ProcessResult result =
+      runOcr(payload, QStringLiteral("11"), true, languages, stop);
+  if (cancelled())
+    return {};
+  if (!result.finished || result.exitCode != 0) {
+    // OCR diagnostics can contain recognized source text. Keep this action's
+    // error generic instead of forwarding stdout or stderr to the UI/logs.
+    error = QStringLiteral("Email detection failed; check Tesseract and OCR languages");
+    return {};
+  }
+
+  const qreal scaleX =
+      capture.source.width() / static_cast<qreal>(capture.previewSize.width());
+  const qreal scaleY =
+      capture.source.height() / static_cast<qreal>(capture.previewSize.height());
+  const QRectF bounds(QPointF(), selection.size());
+  const QRect imageBounds(QPoint(), image.size());
+  constexpr int padding = 3;
+  QVector<QRectF> regions;
+  for (const QRect &region :
+       emailAddressRegions(QString::fromUtf8(result.output), image.size())) {
+    const QRect padded =
+        region.adjusted(-padding, -padding, padding, padding)
+            .intersected(imageBounds);
+    const QRectF logical(
+        (pixels.x() + padded.x()) / scaleX - selection.x(),
+        (pixels.y() + padded.y()) / scaleY - selection.y(),
+        padded.width() / scaleX, padded.height() / scaleY);
+    const QRectF bounded = logical.intersected(bounds);
+    if (!bounded.isEmpty() && !regions.contains(bounded))
+      regions.push_back(bounded);
+  }
+  return regions;
 }
 
 QStringList captureNotificationArguments(const QString &message,
